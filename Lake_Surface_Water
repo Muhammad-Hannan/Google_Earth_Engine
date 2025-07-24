@@ -1,0 +1,181 @@
+/*
+This script performs long-term monitoring of surface water dynamics over a defined lake boundary (ROI) using Landsat 7, 8, and 9 imagery. It:
+Loads and visualizes the lake boundary.
+Divides the study period (2001–2024) into 5-year intervals.
+Applies cloud and shadow masking to Landsat surface reflectance data.
+Harmonizes spectral bands across Landsat missions.
+Calculates three water indices: NDWI, MNDWI, and AWEInsh.
+Computes the median composite and binary water maps (>0 threshold).
+Visualizes index layers and histograms for each period.
+Generates time series charts of water area.
+Exports median images, classified maps, and water area statistics as CSVs to Google Drive.
+Ideal for assessing spatiotemporal trends in lake surface water using remote sensing-based indices.
+*/
+
+// Code by Muhammad Hannan
+
+// ------------------------------------
+// 1. Load ROI (Update with your asset)
+// ------------------------------------
+var roi = ee.FeatureCollection(table);
+Map.centerObject(roi);
+Map.addLayer(roi, {}, 'Lake Boundary');
+
+// ------------------------------------
+// 2. Define Date Ranges (5-Year Periods)
+// ------------------------------------
+var periods = [
+  ['2001-01-01', '2005-12-31'],
+  ['2006-01-01', '2010-12-31'],
+  ['2011-01-01', '2015-12-31'],
+  ['2016-01-01', '2020-12-31'],
+  ['2021-01-01', '2024-12-31']
+];
+
+// ------------------------------------
+// 3. Cloud Masking
+// ------------------------------------
+function maskLandsatSR(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 5);
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+               .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+// ------------------------------------
+// 4. Load and Harmonize Landsat Data
+// ------------------------------------
+function getLandsatCollection(start, end) {
+  var l7 = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
+    .filterDate(start, end).filterBounds(roi)
+    .map(maskLandsatSR)
+    .select(['SR_B2','SR_B4','SR_B5','SR_B7'], ['Green','NIR','SWIR1','SWIR2']);
+
+  var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterDate(start, end).filterBounds(roi)
+    .map(maskLandsatSR)
+    .select(['SR_B3','SR_B5','SR_B6','SR_B7'], ['Green','NIR','SWIR1','SWIR2']);
+
+  var l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+    .filterDate(start, end).filterBounds(roi)
+    .map(maskLandsatSR)
+    .select(['SR_B3','SR_B5','SR_B6','SR_B7'], ['Green','NIR','SWIR1','SWIR2']);
+
+  return l7.merge(l8).merge(l9);
+}
+
+// ------------------------------------
+// 5. Main Loop for Each Period
+// ------------------------------------
+periods.forEach(function(range) {
+  var start = ee.Date(range[0]);
+  var end = ee.Date(range[1]);
+  var label = start.format('YYYY').getInfo() + '-' + end.format('YYYY').getInfo();
+
+  var landsat = getLandsatCollection(start, end);
+
+  // NDWI, MNDWI, AWEInsh
+  var indices = landsat.map(function(img) {
+    var ndwi = img.normalizedDifference(['Green', 'NIR']).rename('NDWI');
+    var mndwi = img.normalizedDifference(['Green', 'SWIR1']).rename('MNDWI');
+    var aweinsh = img.expression(
+      '4 * (GREEN - SWIR1) - (0.25 * NIR + 2.75 * SWIR2)', {
+        'GREEN': img.select('Green'),
+        'NIR': img.select('NIR'),
+        'SWIR1': img.select('SWIR1'),
+        'SWIR2': img.select('SWIR2')
+      }).rename('AWEInsh');
+    return ndwi.addBands(mndwi).addBands(aweinsh)
+               .copyProperties(img, img.propertyNames());
+  });
+
+  ['NDWI', 'MNDWI', 'AWEInsh'].forEach(function(indexName) {
+    var indexCol = indices.select(indexName);
+    var median = indexCol.median();
+    var classified = median.gt(0.0).rename(indexName + '_Classified');
+
+    // Map Visualization
+    Map.addLayer(median.clip(roi), 
+      {min: -0.2, max: 0.5, palette: ['white', 'blue']}, 
+      indexName + ' Median ' + label);
+
+    Map.addLayer(classified.clip(roi), 
+      {min: 0, max: 1, palette: ['white', 'blue']}, 
+      indexName + ' Classified ' + label);
+
+    // Histogram
+    print(ui.Chart.image.histogram(median, roi, 30)
+      .setOptions({
+        title: indexName + ' Histogram (' + label + ')',
+        hAxis: {title: indexName},
+        vAxis: {title: 'Frequency'}
+      }));
+
+    // Water Area Time Series
+    var areaCol = indexCol.map(function(img){
+      var mask = img.gt(0.0).updateMask(img.gt(0.0));
+      var area = mask.multiply(ee.Image.pixelArea()).divide(1e6).rename('WaterArea_km2');
+      return area.copyProperties(img, img.propertyNames());
+    });
+
+    print(ui.Chart.image.series({
+      imageCollection: areaCol,
+      region: roi,
+      reducer: ee.Reducer.sum(),
+      scale: 30,
+      xProperty: 'system:time_start'
+    }).setOptions({
+      title: indexName + ' Water Area Time Series (' + label + ')',
+      vAxis: {title: 'Water Area (km²)'},
+      hAxis: {title: 'Date'}
+    }));
+
+    // Export Median Raster
+    Export.image.toDrive({
+      image: median.clip(roi),
+      description: indexName + '_Median_' + label,
+      folder: 'GEE_Exports',
+      fileNamePrefix: indexName + '_Median_' + label,
+      region: roi.geometry(),
+      scale: 30,
+      maxPixels: 1e13
+    });
+
+    // Export Classified Map
+    Export.image.toDrive({
+      image: classified.clip(roi),
+      description: indexName + '_Classified_' + label,
+      folder: 'GEE_Exports',
+      fileNamePrefix: indexName + '_Classified_' + label,
+      region: roi.geometry(),
+      scale: 30,
+      maxPixels: 1e13
+    });
+
+    // Export Water Area CSV
+    var areaFC = areaCol.map(function(img) {
+      var stats = img.reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: roi,
+        scale: 30,
+        maxPixels: 1e13
+      });
+      return ee.Feature(null, {
+        'date': img.date().format('YYYY-MM-dd'),
+        'water_area_km2': stats.get('WaterArea_km2')
+      });
+    });
+
+    Export.table.toDrive({
+      collection: areaFC,
+      description: indexName + '_Water_Area_' + label,
+      folder: 'GEE_Exports',
+      fileNamePrefix: indexName + '_Water_Area_' + label,
+      fileFormat: 'CSV'
+    });
+
+  }); // End index loop
+
+}); // End period loop
