@@ -1,0 +1,95 @@
+/*
+This script extracts and analyzes annual terrestrial, groundwater, and surface water storage over Sindh province (Pakistan) using the NASA GLDAS CLSM v2.2 dataset It:
+Defines the study period from 2003 to 2024.
+Loads and filters daily GLDAS TWS (Terrestrial Water Storage) and GWS (Groundwater Storage) variables.
+Calculates annual mean values of TWS and GWS for each year.
+Derives Surface Water Storage (SWS) by subtracting GWS from TWS.
+Generates multi-band raster images for TWS, GWS, and SWS, with each band representing a specific year.
+Exports the multi-band rasters (2003–2024) to Google Drive.
+Visualizes selected year (e.g., 2020) layers for TWS, GWS, and SWS on the map using custom palettes.
+Ideal for multi-year, spatially explicit hydrological storage trend analysis across Sindh province.
+*/
+
+// Code by Muhammad Hannan
+
+// 1. Define start and end years
+var startYear = 2003;
+var endYear = 2024;
+
+// 2. Load GLDAS v2.2 dataset
+var dataset = ee.ImageCollection('NASA/GLDAS/V022/CLSM/G025/DA1D')
+                .select(['TWS_tavg', 'GWS_tavg']);
+
+// 3. Load Sindh province boundary
+var admin = ee.FeatureCollection("FAO/GAUL/2015/level1");
+var sindh = admin.filter(ee.Filter.and(
+              ee.Filter.eq('ADM0_NAME', 'Pakistan'),
+              ee.Filter.eq('ADM1_NAME', 'Sindh')
+            ));
+
+// 4. Generate list of years
+var years = ee.List.sequence(startYear, endYear);
+
+// 5. Create multi-band images for each variable
+var twsMultiBand = ee.Image([]);
+var gwsMultiBand = ee.Image([]);
+var swsMultiBand = ee.Image([]);
+
+// 6. Loop through each year
+years.getInfo().forEach(function(y) {
+  var year = ee.Number(y);
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year.add(1), 1, 1);
+
+  var annual = dataset.filterDate(startDate, endDate);
+
+  var tws = annual.select('TWS_tavg').mean().clip(sindh).toFloat().rename('TWS_' + y);
+  var gws = annual.select('GWS_tavg').mean().clip(sindh).toFloat().rename('GWS_' + y);
+  var sws = tws.subtract(gws).rename('SWS_' + y);
+
+  twsMultiBand = twsMultiBand.addBands(tws);
+  gwsMultiBand = gwsMultiBand.addBands(gws);
+  swsMultiBand = swsMultiBand.addBands(sws);
+});
+
+// 7. Export each image to Google Drive
+Export.image.toDrive({
+  image: twsMultiBand,
+  description: 'TWS_2003_to_2024',
+  folder: 'GLDAS_Sindh',
+  fileNamePrefix: 'TWS_2003_to_2024',
+  region: sindh.geometry(),
+  scale: 25000,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: gwsMultiBand,
+  description: 'GWS_2003_to_2024',
+  folder: 'GLDAS_Sindh',
+  fileNamePrefix: 'GWS_2003_to_2024',
+  region: sindh.geometry(),
+  scale: 25000,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: swsMultiBand,
+  description: 'SWS_2003_to_2024',
+  folder: 'GLDAS_Sindh',
+  fileNamePrefix: 'SWS_2003_to_2024',
+  region: sindh.geometry(),
+  scale: 25000,
+  maxPixels: 1e13
+});
+
+// 8. OPTIONAL: Show 2020 bands on the map
+var previewYear = 2020;
+var twsBandName = 'TWS_' + previewYear;
+var gwsBandName = 'GWS_' + previewYear;
+var swsBandName = 'SWS_' + previewYear;
+
+Map.centerObject(sindh, 6);
+Map.addLayer(twsMultiBand.select(twsBandName), {min: -500, max: 500, palette: ['blue', 'white', 'red']}, 'TWS ' + previewYear);
+Map.addLayer(gwsMultiBand.select(gwsBandName), {min: -500, max: 500, palette: ['green', 'white', 'brown']}, 'GWS ' + previewYear);
+Map.addLayer(swsMultiBand.select(swsBandName), {min: -200, max: 200, palette: ['#08306b', '#4292c6', '#f7fbff']}, 'SWS ' + previewYear);
