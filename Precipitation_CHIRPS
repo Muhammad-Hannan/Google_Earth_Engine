@@ -1,0 +1,118 @@
+/*
+This script analyzes historical daily and monthly precipitation using the CHIRPS dataset over a specified region of interest (ROI). It:
+Centers and displays the ROI on the map.
+Loads CHIRPS daily precipitation data and filters it by date (January–December 2000).
+Calculates and visualizes total annual precipitation as a spatial raster.
+Computes the mean daily precipitation across the ROI.
+Generates a time series chart of average daily precipitation.
+Creates a monthly-aggregated ImageCollection for the year and plots average monthly rainfall.
+Exports the annual precipitation sum raster as a GeoTIFF to Google Drive.
+Ideal for visualizing and quantifying seasonal and annual rainfall patterns using satellite-based precipitation data.
+*/
+
+// Code by Muhammad Hannan
+
+Map.centerObject(roi,5);
+Map.addLayer(roi,{},'ROI');
+
+// obtain first date
+var firstimg= chirps.limit(1,"system:time_start",true).first();
+var firstDate = ee.Date(firstimg.get('system:time_start'));
+print('The first image is', firstDate);
+
+// obtain last date
+var lastimg= chirps.limit(1,'system:time_start',false).first();
+var lastDate = ee.Date(lastimg.get('system:time_start'));
+print('The last image is', lastDate);
+
+var startyear = 2000;
+var startmonth = 1;
+var startday =1;
+
+var endyear =2000;
+var endmonth = 12;
+var endday = 31;
+
+var startdate = ee.Date.fromYMD(startyear,startmonth,startday);
+var enddate = ee.Date.fromYMD(endyear,endmonth,endday);
+
+var filteredChirps = chirps.filterDate(startdate,enddate);
+print('Filtered Collection', filteredChirps);
+
+var prcpSum = filteredChirps.reduce(ee.Reducer.sum());
+print('Pr sum', prcpSum);
+
+//var prcpSum = filteredChirps.sum();
+//print("Pr Sum", prcpSum);
+
+var prcpMean = filteredChirps.reduce(ee.Reducer.mean());
+print('Pr Mean', prcpMean);
+
+var prcpAnnaulVis = {
+  min: 10,
+  max: 300,
+  palette: ['001137', '0aab1e', 'e7eb05', 'ff4a2d', 'e90000'],
+};
+
+ Map.addLayer(prcpSum.clip(roi), prcpAnnaulVis, 'Precipitation');
+ 
+  var chartOptions = {
+   title: 'CHIRPS Precipitation ROI',
+   vAxix: {title: 'mm/day',maxValue:30},
+   hAxix: { title: 'Date', format:'MM-yy',gridlines: {count:6}},
+ };
+ 
+// Spatial plot of average daily rainfall
+var dailyprcpChart = ui.Chart.image.series({
+  imageCollection: filteredChirps, 
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale:5000})
+  .setChartType('ColumnChart')
+  .setOptions(chartOptions);
+  
+print('Average Daily precipitation', dailyprcpChart);
+
+// **Obtain timeseries of average monthly values**
+
+// Group by month, and then reduce within groups by sum();
+// the result is an ImageCollection with one image for each
+// month.
+
+var months = ee.List.sequence(startmonth,endmonth);
+var years = ee.List.sequence(startyear,endyear);
+
+var monthlyprcp =  ee.ImageCollection.fromImages(
+  years.map(function (y) {
+  return months.map(function(m){
+  var w = chirps.filter(ee.Filter.calendarRange(y, y, 'year'))
+           .filter(ee.Filter.calendarRange(m, m, 'month'))
+           .sum();
+  return w.set('year', y)
+           .set('month', m)
+           .set('date', ee.Date.fromYMD(y,m,1))
+           .set('system:time_start',ee.Date.fromYMD(y,m,1)) 
+                        
+});
+}).flatten());
+
+// Declare and print the chart
+var monthlyprcpChart = ui.Chart.image.series({
+  imageCollection: monthlyprcp, 
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale:5000,
+})
+  .setChartType('ColumnChart')
+
+print('Average Monthly precipitation', monthlyprcpChart);
+
+// Export the prcpSum image to Google Drive
+Export.image.toDrive({
+  image: prcpSum.clip(roi),  // Use the prcpSum image
+  description: 'prcp_sum_image', // Description for the exported image
+  scale: 5000,  // Specify the scale
+  region: roi,  // Specify the region of interest
+  folder: 'precipitation',  // Specify the folder in your Google Drive where you want to save the image
+  crs: 'EPSG:4326'  // Specify the CRS (Coordinate Reference System)
+});
