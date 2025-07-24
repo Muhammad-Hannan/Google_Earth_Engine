@@ -1,0 +1,104 @@
+/*
+This script analyzes annual groundwater storage (GWS) dynamics over a defined Area of Interest (AOI) using daily data from the NASA GLDAS CLSM v2.2 dataset. It:
+Defines the analysis period from 2003 to 2024.
+Loads GLDAS daily GWS data and filters it by AOI.
+Aggregates annual mean groundwater storage images.
+Exports yearly spatial GWS maps as GeoTIFF files to Google Drive.
+Computes annual mean GWS values across the AOI.
+Exports annual mean statistics as a CSV file.
+Visualizes annual GWS images on the map.
+Generates a time series chart of annual mean GWS over the AOI.
+Ideal for long-term assessment of regional groundwater trends using satellite-based hydrological data.
+*/
+
+// Code by Muhammad Hannan
+
+// DEFINE TIME RANGE
+var startYear = 2003;
+var endYear = 2024;
+
+// LOAD GLDAS CLSM v2.2 DATA
+var gldas = ee.ImageCollection("NASA/GLDAS/V022/CLSM/G025/DA1D")
+              .filterBounds(AOI)
+              .select('GWS_tavg');
+
+var yearList = ee.List.sequence(startYear, endYear);
+
+// COMPUTE ANNUAL GWS
+var annualImages = yearList.map(function(year) {
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end = start.advance(1, 'year');
+
+  var annualImg = gldas.filterDate(start, end).mean()
+                      .clip(AOI)
+                      .rename('GWS')
+                      .set('year', year)
+                      .set('system:time_start', start.millis());
+  
+  return annualImg;
+});
+
+var annualCollection = ee.ImageCollection(annualImages);
+
+// EXPORT ANNUAL SPATIAL (TIFFS)
+yearList.getInfo().forEach(function(year) {
+  var img = annualCollection.filter(ee.Filter.eq('year', year)).first();
+
+  Export.image.toDrive({
+    image: img,
+    description: 'GWS_AOI_' + year,
+    folder: 'GWS_Annual_TIFFs',
+    fileNamePrefix: 'GWS_' + year,
+    region: AOI.geometry(),
+    scale: 25000,
+    maxPixels: 1e13
+  });
+});
+
+// CALCULATE ANNUAL MEAN VALUES (CSV)
+var annualMeans = annualCollection.map(function(image) {
+  var meanDict = image.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: AOI.geometry(),
+    scale: 10000,
+    maxPixels: 1e13
+  });
+  
+  return ee.Feature(null, meanDict).set('year', image.get('year')).set('system:time_start', image.get('system:time_start'));
+});
+
+// EXPORT ANNUAL MEAN CSV
+Export.table.toDrive({
+  collection: annualMeans,
+  description: 'GWS_Annual_Mean',
+  folder: 'GWS_Annual_CSV',
+  fileNamePrefix: 'GWS_Annual_Mean',
+  fileFormat: 'CSV'
+});
+
+// VISUALIZATION PARAMETERS
+var visParams = {
+  min: -200,
+  max: 200,
+  palette: ['blue', 'white', 'red']
+};
+
+// DISPLAY ANNUAL GWS ON MAP
+Map.centerObject(AOI, 6);
+Map.addLayer(annualCollection.sort('system:time_start'), visParams, 'Annual GWS (2003–2024)', true);
+
+// CREATE AND PRINT CHART OF ANNUAL MEAN GWS
+var chart = ui.Chart.feature.byFeature({
+  features: annualMeans, 
+  xProperty: 'year', 
+  yProperties: ['GWS']
+}).setOptions({
+  title: 'Annual Mean Groundwater Storage (GWS) Over AOI (2003-2024)',
+  hAxis: {title: 'Year', format: '####'},
+  vAxis: {title: 'Mean GWS (mm)'},
+  lineWidth: 2,
+  pointSize: 5,
+  colors: ['#1f77b4']
+});
+
+print(chart);
